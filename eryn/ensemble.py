@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 from itertools import count
 from copy import deepcopy
+import ray
 
 from .backends import Backend, HDFBackend
 from .model import Model
@@ -1409,10 +1410,48 @@ class EnsembleSampler(object):
                 map_func = self.pool.map
 
             else:
-                map_func = map
+                # map_func = map
+                # # print(args_in)
+                # # print("----------------------------------------")
+                # # print(np.asarray(list(map(self.log_like_fn, args_in))))
+                # # print('*****************************************')
 
-            # get results and turn into an array
-            results = np.asarray(list(map_func(self.log_like_fn, args_in)))
+                # # 1.源代码
+                # results = np.asarray(list(map_func(self.log_like_fn, args_in)))
+
+                # # 2.ray+使用ray.get先将数据批量进行传递
+                # @ray.remote(num_cpus=8)
+                # def parallel_log_like_fn(arg):
+                #     return self.log_like_fn(arg)
+                
+                # arg_refs = [ray.put(arg_in) for arg_in in args_in]
+                # results_refs = [parallel_log_like_fn.remote(arg_ref) for arg_ref in arg_refs]
+                # results = ray.get(results_refs)
+                # results = np.asarray(results)
+
+
+                #3.ray+batch
+                @ray.remote(num_cpus=8)
+                def parallel_log_like_fn(batch_args):
+                    results = []
+                    for arg in batch_args:
+                        result = self.log_like_fn(arg)
+                        results.append(result)
+                    return results
+
+                # 将参数分成批处理
+                arg_refs = [ray.put(arg_in) for arg_in in args_in]
+                batch_size = len(args_in)//10
+                batch_args = [args_in[i:i + batch_size] for i in range(0, len(args_in), batch_size)]
+                ray.put(batch_args)
+                # 提交批处理任务
+                results_refs = [parallel_log_like_fn.remote(batch) for batch in batch_args]
+
+                # 获取结果
+                results_list = ray.get(results_refs)
+
+                # 将结果列表转换为 NumPy 数组
+                results = np.concatenate(results_list)
 
         assert isinstance(results, np.ndarray)
 
